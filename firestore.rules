@@ -1,0 +1,447 @@
+rules_version = '2';
+
+// ===============================================================
+// UltraLink Cloud Firestore Security Rules
+// ===============================================================
+// Assumed Data Models:
+//
+// 1. Collection: profiles/{userId}
+//    Document ID: Matches request.auth.uid (or 'uid' alias)
+//    Fields:
+//      - userId / uid: string (matches auth.uid, immutable)
+//      - displayName: string (1-50 chars, required)
+//      - email: string | null (optional/nullable, valid email format <= 100 chars)
+//      - photoURL: string | null (optional/nullable, valid HTTP/HTTPS URL <= 500 chars)
+//      - isAnonymous: bool (required, true for guest sessions)
+//      - role: string ('user' | 'admin', immutable for non-admins)
+//      - createdAt: timestamp (immutable creation time)
+//      - updatedAt: timestamp (optional update time)
+//      - settings: map (optional user preferences map <= 10 keys)
+//
+// 2. Collection: preferences/{userId}
+//    Document ID: Matches request.auth.uid
+//    Fields:
+//      - userId / uid: string (matches auth.uid, immutable)
+//      - defaultProfile: string ('reliable' | 'balanced' | 'fast' | 'experimental')
+//      - theme: string ('dark' | 'light' | 'system')
+//      - audioPreferences: map (structured DSP parameters <= 15 keys)
+//      - updatedAt: timestamp (optional update time)
+//
+// 3. Collection: message_history/{messageId}
+//    Document ID: Unique message identifier string (1-64 chars)
+//    CRITICAL PRIVACY DIRECTIVE: Zero plaintext message content allowed.
+//    Fields:
+//      - messageId / id: string (1-64 chars)
+//      - ownerId: string (matches auth.uid, required)
+//      - direction: string ('transmitted' | 'received' | 'sent')
+//      - timestamp: timestamp (required)
+//      - payloadLength: int (0-65535, transmission byte count)
+//      - status: string ('success' | 'failed' | 'crc_mismatch' | 'corrupted' | 'cancelled' | 'delivered' | 'decoded' | 'crc_failed')
+//      - profileUsed: string ('reliable' | 'balanced' | 'fast' | 'experimental')
+//      - sampleRate: int (8000-192000, typically 44100 or 48000)
+//      - frequencyRange: string (optional, 1-60 chars)
+//      - durationMs: int (optional, 0-3600000 ms)
+//      - crcPassed: bool (required, CRC verification outcome)
+//      - snrEstimate / snrDb: number | null (optional SNR in dB)
+//      - packetCount: int (optional, 0-10000)
+//      - duplicatePacketsDetected: int (optional, 0-10000)
+//      - clientLocalRefId: string (optional local IndexedDB pointer <= 64 chars)
+//
+// 4. Collection: devices/{deviceId}
+//    Document ID: Persistent device identifier string (1-128 chars)
+//    Fields:
+//      - deviceId: string (1-128 chars, immutable)
+//      - userId / ownerId: string (matches auth.uid, immutable)
+//      - userAgent: string (optional <= 300 chars)
+//      - browser: string (optional <= 50 chars)
+//      - os: string (optional <= 50 chars)
+//      - isMobile: bool (optional)
+//      - supportedSampleRates: list (optional <= 10 items)
+//      - actualSampleRate: int (8000-192000)
+//      - audioWorkletSupported: bool
+//      - micPermission: string ('granted' | 'denied' | 'prompt')
+//      - maxInputChannels: int (optional 0-32)
+//      - highFreqSensitivityScore: number (0.0-100.0)
+//      - lastActive: timestamp
+//      - createdAt: timestamp (immutable)
+//
+// 5. Collection: feedback/{feedbackId}
+//    Document ID: Feedback submission identifier string (1-64 chars)
+//    Fields:
+//      - feedbackId: string (1-64 chars)
+//      - userId: string | null (optional author auth.uid)
+//      - rating: int (1-5 integer)
+//      - category: string ('transmission_quality' | 'bug' | 'feature_request' | 'audio_hardware' | 'other')
+//      - profileUsed: string | null (optional)
+//      - comment: string (1-1000 chars)
+//      - deviceDiagnostics: map (optional diagnostics metadata <= 10 keys)
+//      - status: string ('new' | 'reviewed' | 'resolved')
+//      - createdAt: timestamp
+// ===============================================================
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // =============================================================
+    // Helper Functions
+    // =============================================================
+
+    // Check if the client request is authenticated
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Check if the authenticated user's UID matches the specified userId
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // Check if the authenticated user is the owner of a device document
+    function isDeviceOwner(data) {
+      return isAuthenticated() && (
+        (('userId' in data) && data.userId == request.auth.uid) ||
+        (('ownerId' in data) && data.ownerId == request.auth.uid)
+      );
+    }
+
+    // Check if the authenticated user holds administrative authority
+    // Derived strictly from trusted custom claims, verified bootstrap email, or stored profile role
+    function isAdmin() {
+      return isAuthenticated() && (
+        (('role' in request.auth.token) && request.auth.token.role == 'admin') ||
+        (('email' in request.auth.token) &&
+         request.auth.token.email == 'admin@ultralink.internal' &&
+         ('email_verified' in request.auth.token) &&
+         request.auth.token.email_verified == true) ||
+        (exists(/databases/$(database)/documents/profiles/$(request.auth.uid)) &&
+         get(/databases/$(database)/documents/profiles/$(request.auth.uid)).data.role == 'admin')
+      );
+    }
+
+    // Validate that only allowed fields exist in the incoming document
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    // Validate that all required fields exist in the incoming document
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+
+    // Verify that specified immutable fields were not altered during update
+    function areImmutableFieldsUnchanged(fields) {
+      return !request.resource.data.diff(resource.data).affectedKeys().hasAny(fields);
+    }
+
+    // Validate email format and bounded length
+    function isValidEmail(email) {
+      return email is string &&
+        email.size() >= 3 && email.size() <= 100 &&
+        email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
+    }
+
+    // Validate HTTP/HTTPS URL format and bounded length
+    function isValidUrl(url) {
+      return url is string &&
+        url.size() >= 8 && url.size() <= 500 &&
+        (url.matches("^https://.*") || url.matches("^http://.*"));
+    }
+
+    // =============================================================
+    // Domain Validators
+    // =============================================================
+
+    // Validator: profiles/{userId}
+    function isValidProfile(data, targetUserId) {
+      return hasOnlyAllowedFields([
+          'userId', 'uid', 'displayName', 'email', 'photoURL',
+          'isAnonymous', 'role', 'createdAt', 'updatedAt', 'settings'
+        ]) &&
+        hasRequiredFields(['displayName', 'isAnonymous', 'role', 'createdAt']) &&
+        (
+          (!('userId' in data) || data.userId == targetUserId) &&
+          (!('uid' in data) || data.uid == targetUserId) &&
+          (('userId' in data) || ('uid' in data))
+        ) &&
+        data.displayName is string &&
+        data.displayName.size() >= 1 &&
+        data.displayName.size() <= 50 &&
+        (
+          !('email' in data) ||
+          data.email == null ||
+          isValidEmail(data.email)
+        ) &&
+        (
+          !('photoURL' in data) ||
+          data.photoURL == null ||
+          isValidUrl(data.photoURL)
+        ) &&
+        data.isAnonymous is bool &&
+        data.role in ['user', 'admin'] &&
+        data.createdAt is timestamp &&
+        (
+          !('updatedAt' in data) ||
+          data.updatedAt is timestamp
+        ) &&
+        (
+          !('settings' in data) ||
+          (data.settings is map && data.settings.size() <= 10)
+        );
+    }
+
+    // Validator: preferences audio sub-map
+    function isValidAudioPreferences(prefs) {
+      return prefs is map &&
+        prefs.size() <= 15 &&
+        prefs.keys().hasOnly([
+          'outputVolume', 'carrierFrequency', 'minFrequency', 'maxFrequency',
+          'enableAutoGainControl', 'enableEchoCancellation', 'enableNoiseSuppression',
+          'hapticFeedback', 'soundConfirmation'
+        ]) &&
+        (!('outputVolume' in prefs) || (prefs.outputVolume is number && prefs.outputVolume >= 0.0 && prefs.outputVolume <= 1.0)) &&
+        (!('carrierFrequency' in prefs) || (prefs.carrierFrequency is number && prefs.carrierFrequency >= 16000 && prefs.carrierFrequency <= 20000)) &&
+        (!('minFrequency' in prefs) || (prefs.minFrequency is number && prefs.minFrequency >= 16000 && prefs.minFrequency <= 20000)) &&
+        (!('maxFrequency' in prefs) || (prefs.maxFrequency is number && prefs.maxFrequency >= 16000 && prefs.maxFrequency <= 20000)) &&
+        (!('enableAutoGainControl' in prefs) || prefs.enableAutoGainControl is bool) &&
+        (!('enableEchoCancellation' in prefs) || prefs.enableEchoCancellation is bool) &&
+        (!('enableNoiseSuppression' in prefs) || prefs.enableNoiseSuppression is bool) &&
+        (!('hapticFeedback' in prefs) || prefs.hapticFeedback is bool) &&
+        (!('soundConfirmation' in prefs) || prefs.soundConfirmation is bool);
+    }
+
+    // Validator: preferences/{userId}
+    function isValidPreferences(data, targetUserId) {
+      return hasOnlyAllowedFields(['userId', 'uid', 'defaultProfile', 'theme', 'audioPreferences', 'updatedAt']) &&
+        hasRequiredFields(['defaultProfile', 'theme']) &&
+        (
+          (!('userId' in data) || data.userId == targetUserId) &&
+          (!('uid' in data) || data.uid == targetUserId) &&
+          (('userId' in data) || ('uid' in data))
+        ) &&
+        data.defaultProfile in ['reliable', 'balanced', 'fast', 'experimental'] &&
+        data.theme in ['dark', 'light', 'system'] &&
+        (
+          !('audioPreferences' in data) ||
+          isValidAudioPreferences(data.audioPreferences)
+        ) &&
+        (
+          !('updatedAt' in data) ||
+          data.updatedAt is timestamp
+        );
+    }
+
+    // Validator: message_history/{messageId} (Enforces Zero-Plaintext Storage)
+    function isValidMessageHistory(data) {
+      return hasOnlyAllowedFields([
+          'messageId', 'id', 'ownerId', 'direction', 'timestamp',
+          'payloadLength', 'status', 'profileUsed', 'sampleRate',
+          'frequencyRange', 'durationMs', 'crcPassed', 'snrEstimate',
+          'snrDb', 'packetCount', 'duplicatePacketsDetected', 'clientLocalRefId'
+        ]) &&
+        hasRequiredFields([
+          'ownerId', 'direction', 'timestamp',
+          'payloadLength', 'status', 'profileUsed', 'sampleRate', 'crcPassed'
+        ]) &&
+        (('messageId' in data) || ('id' in data)) &&
+        (!('messageId' in data) || (data.messageId is string && data.messageId.size() >= 1 && data.messageId.size() <= 64)) &&
+        (!('id' in data) || (data.id is string && data.id.size() >= 1 && data.id.size() <= 64)) &&
+        data.ownerId == request.auth.uid &&
+        data.direction in ['transmitted', 'received', 'sent'] &&
+        data.timestamp is timestamp &&
+        data.payloadLength is int &&
+        data.payloadLength >= 0 &&
+        data.payloadLength <= 65535 &&
+        data.status in ['success', 'failed', 'crc_mismatch', 'corrupted', 'cancelled', 'delivered', 'decoded', 'crc_failed'] &&
+        data.profileUsed in ['reliable', 'balanced', 'fast', 'experimental'] &&
+        data.sampleRate is int &&
+        data.sampleRate >= 8000 &&
+        data.sampleRate <= 192000 &&
+        (!('frequencyRange' in data) || (data.frequencyRange is string && data.frequencyRange.size() >= 1 && data.frequencyRange.size() <= 60)) &&
+        (!('durationMs' in data) || (data.durationMs is int && data.durationMs >= 0 && data.durationMs <= 3600000)) &&
+        data.crcPassed is bool &&
+        (!('snrEstimate' in data) || data.snrEstimate == null || data.snrEstimate is number) &&
+        (!('snrDb' in data) || data.snrDb == null || data.snrDb is number) &&
+        (!('packetCount' in data) || (data.packetCount is int && data.packetCount >= 0 && data.packetCount <= 10000)) &&
+        (!('duplicatePacketsDetected' in data) || (data.duplicatePacketsDetected is int && data.duplicatePacketsDetected >= 0 && data.duplicatePacketsDetected <= 10000)) &&
+        (!('clientLocalRefId' in data) || (data.clientLocalRefId is string && data.clientLocalRefId.size() >= 1 && data.clientLocalRefId.size() <= 64)) &&
+        // PRIVACY ENFORCEMENT: Strictly forbid any plaintext message body fields
+        !data.keys().hasAny(['text', 'content', 'message', 'body', 'plaintextContent', 'payload', 'rawBytes', 'data']);
+    }
+
+    // Validator: devices/{deviceId}
+    function isValidDevice(data) {
+      return hasOnlyAllowedFields([
+          'deviceId', 'userId', 'ownerId', 'userAgent', 'browser', 'os',
+          'isMobile', 'supportedSampleRates', 'actualSampleRate',
+          'audioWorkletSupported', 'micPermission', 'maxInputChannels',
+          'highFreqSensitivityScore', 'lastActive', 'createdAt'
+        ]) &&
+        hasRequiredFields([
+          'deviceId', 'actualSampleRate', 'audioWorkletSupported',
+          'micPermission', 'highFreqSensitivityScore', 'lastActive', 'createdAt'
+        ]) &&
+        (
+          (('userId' in data) && data.userId == request.auth.uid) ||
+          (('ownerId' in data) && data.ownerId == request.auth.uid)
+        ) &&
+        data.deviceId is string &&
+        data.deviceId.size() >= 1 &&
+        data.deviceId.size() <= 128 &&
+        (!('userAgent' in data) || (data.userAgent is string && data.userAgent.size() <= 300)) &&
+        (!('browser' in data) || (data.browser is string && data.browser.size() <= 50)) &&
+        (!('os' in data) || (data.os is string && data.os.size() <= 50)) &&
+        (!('isMobile' in data) || data.isMobile is bool) &&
+        (!('supportedSampleRates' in data) || (data.supportedSampleRates is list && data.supportedSampleRates.size() <= 10)) &&
+        data.actualSampleRate is int &&
+        data.actualSampleRate >= 8000 &&
+        data.actualSampleRate <= 192000 &&
+        data.audioWorkletSupported is bool &&
+        data.micPermission in ['granted', 'denied', 'prompt'] &&
+        (!('maxInputChannels' in data) || (data.maxInputChannels is int && data.maxInputChannels >= 0 && data.maxInputChannels <= 32)) &&
+        data.highFreqSensitivityScore is number &&
+        data.highFreqSensitivityScore >= 0 &&
+        data.highFreqSensitivityScore <= 100 &&
+        data.lastActive is timestamp &&
+        data.createdAt is timestamp;
+    }
+
+    // Validator: feedback/{feedbackId}
+    function isValidFeedback(data) {
+      return hasOnlyAllowedFields([
+          'feedbackId', 'userId', 'rating', 'category', 'profileUsed',
+          'comment', 'deviceDiagnostics', 'status', 'createdAt'
+        ]) &&
+        hasRequiredFields([
+          'feedbackId', 'rating', 'category', 'comment', 'status', 'createdAt'
+        ]) &&
+        data.feedbackId is string &&
+        data.feedbackId.size() >= 1 &&
+        data.feedbackId.size() <= 64 &&
+        (
+          !('userId' in data) ||
+          data.userId == null ||
+          (data.userId is string && data.userId == request.auth.uid)
+        ) &&
+        data.rating is int &&
+        data.rating >= 1 &&
+        data.rating <= 5 &&
+        data.category in ['transmission_quality', 'bug', 'feature_request', 'audio_hardware', 'other'] &&
+        (
+          !('profileUsed' in data) ||
+          data.profileUsed == null ||
+          data.profileUsed in ['reliable', 'balanced', 'fast', 'experimental']
+        ) &&
+        data.comment is string &&
+        data.comment.size() >= 1 &&
+        data.comment.size() <= 1000 &&
+        (
+          !('deviceDiagnostics' in data) ||
+          (data.deviceDiagnostics is map && data.deviceDiagnostics.size() <= 10)
+        ) &&
+        data.status in ['new', 'reviewed', 'resolved'] &&
+        data.createdAt is timestamp;
+    }
+
+    // =============================================================
+    // Collection Access Rules
+    // =============================================================
+
+    // 1. User Profiles
+    match /profiles/{userId} {
+      // Owner can read their own profile; admins can read any profile for user management
+      allow read: if isOwner(userId) || isAdmin();
+
+      // Authenticated users can create their own profile with role == 'user'.
+      // Prevents self-promotion to 'admin' unless caller is already an admin.
+      allow create: if isOwner(userId) &&
+                       isValidProfile(request.resource.data, userId) &&
+                       ((request.resource.data.role == 'user') || isAdmin());
+
+      // Owner can update displayName and settings, but CANNOT modify role, userId/uid, or createdAt.
+      // Role modifications are restricted to existing admins.
+      allow update: if isOwner(userId) &&
+                       isValidProfile(request.resource.data, userId) &&
+                       ((request.resource.data.role == resource.data.role) || isAdmin()) &&
+                       areImmutableFieldsUnchanged(['createdAt', 'userId', 'uid']);
+
+      // Profile deletion is disabled
+      allow delete: if false;
+    }
+
+    // 2. User Preferences
+    match /preferences/{userId} {
+      // Strictly owner-only read
+      allow read: if isOwner(userId);
+
+      // Authenticated owner can create preferences
+      allow create: if isOwner(userId) &&
+                       isValidPreferences(request.resource.data, userId);
+
+      // Authenticated owner can update preferences; userId is immutable
+      allow update: if isOwner(userId) &&
+                       isValidPreferences(request.resource.data, userId) &&
+                       areImmutableFieldsUnchanged(['userId', 'uid']);
+
+      // Owner can delete their preferences
+      allow delete: if isOwner(userId);
+    }
+
+    // 3. Message History (Zero-Plaintext Technical Telemetry)
+    match /message_history/{messageId} {
+      // Owner-only read access for personal telemetry audit log
+      allow read: if isAuthenticated() && resource.data.ownerId == request.auth.uid;
+
+      // Authenticated user can create their own telemetry record
+      // Verified zero plaintext fields
+      allow create: if isAuthenticated() &&
+                       request.resource.data.ownerId == request.auth.uid &&
+                       isValidMessageHistory(request.resource.data);
+
+      // Telemetry records are an immutable append-only audit trail
+      allow update: if false;
+      allow delete: if false;
+    }
+
+    // 4. Device Diagnostics
+    match /devices/{deviceId} {
+      // Device owner or admin can read device capabilities
+      allow read: if isAuthenticated() && (isDeviceOwner(resource.data) || isAdmin());
+
+      // Authenticated owner can register their device
+      allow create: if isAuthenticated() &&
+                       isDeviceOwner(request.resource.data) &&
+                       isValidDevice(request.resource.data);
+
+      // Authenticated owner can update device stats; deviceId, createdAt, and owner are immutable
+      allow update: if isAuthenticated() &&
+                       isDeviceOwner(resource.data) &&
+                       isDeviceOwner(request.resource.data) &&
+                       isValidDevice(request.resource.data) &&
+                       areImmutableFieldsUnchanged(['deviceId', 'createdAt', 'userId', 'ownerId']);
+
+      // Device deletion by owner or admin
+      allow delete: if isAuthenticated() && (isDeviceOwner(resource.data) || isAdmin());
+    }
+
+    // 5. User Feedback
+    match /feedback/{feedbackId} {
+      // Feedback reading is restricted to admins only
+      allow read: if isAdmin();
+
+      // Any authenticated user can submit feedback
+      allow create: if isAuthenticated() && isValidFeedback(request.resource.data);
+
+      // Feedback submissions cannot be modified or deleted by users
+      allow update: if false;
+      allow delete: if false;
+    }
+
+    // =============================================================
+    // Default Deny Root
+    // =============================================================
+    // Rejects all reads and writes across any unspecified documents or subcollections
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

@@ -66,9 +66,10 @@ class UltralinkDecoderProcessor extends AudioWorkletProcessor {
       bitsPerSymbol: 3,
     };
 
-    // Circular Ring Buffer (stores ~1.5 seconds of audio)
-    this.ringBufferSize = 65536;
+    // Circular Ring Buffer (stores ~5.5 seconds of audio at 48kHz)
+    this.ringBufferSize = 262144;
     this.ringBuffer = new Float32Array(this.ringBufferSize);
+    this.linearWindow = new Float32Array(this.ringBufferSize);
     this.writePos = 0;
     this.readPos = 0;
     this.totalSamplesReceived = 0;

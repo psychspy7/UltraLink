@@ -634,6 +634,10 @@ class MockFirebaseHarness {
       if (data.role === 'admin' && this.currentUser.role !== 'admin') {
         return { allowed: false, reason: 'Privilege escalation prevented: cannot assign admin role' };
       }
+      const existingProfile = this.collections.profiles.get(docId);
+      if (!isCreate && 'createdAt' in data && data.createdAt !== existingProfile?.createdAt) {
+        return { allowed: false, reason: 'createdAt is immutable' };
+      }
       return { allowed: true };
     }
 
@@ -650,8 +654,20 @@ class MockFirebaseHarness {
       if (data.ownerId !== this.currentUser.uid) {
         return { allowed: false, reason: 'ownerId must match auth.uid' };
       }
-      if (data.text || data.plaintextContent || data.payload) {
-        return { allowed: false, reason: 'Architectural privacy violation: zero plaintext allowed in Firestore' };
+      const forbiddenPlaintextFields = [
+        'text',
+        'content',
+        'message',
+        'body',
+        'plaintextContent',
+        'payload',
+        'rawBytes',
+        'data',
+      ];
+      for (const field of forbiddenPlaintextFields) {
+        if (data[field] !== undefined && data[field] !== null) {
+          return { allowed: false, reason: 'Architectural privacy violation: zero plaintext allowed in Firestore' };
+        }
       }
       return { allowed: true };
     }

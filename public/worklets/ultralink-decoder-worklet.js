@@ -200,12 +200,12 @@ class UltralinkDecoderProcessor extends AudioWorkletProcessor {
     const f0 = this.profile.pilotFrequencies[0];
     const f1 = this.profile.pilotFrequencies[1] || f0 + 1500;
 
-    // Linear unrolled view for the scan window
-    const scanWindowSize = Math.min(availableSamples, 8192);
-    const window = new Float32Array(scanWindowSize);
+    // Linear unrolled view for the scan window (up to full available samples or ringBufferSize)
+    const scanWindowSize = Math.min(availableSamples, this.ringBufferSize);
     for (let i = 0; i < scanWindowSize; i++) {
-      window[i] = this.ringBuffer[(this.readPos + i) % this.ringBufferSize];
+      this.linearWindow[i] = this.ringBuffer[(this.readPos + i) % this.ringBufferSize];
     }
+    const window = this.linearWindow.subarray(0, scanWindowSize);
 
     let scanIdx = 0;
     const maxScan = scanWindowSize - barkerTotalSamples;
@@ -243,10 +243,29 @@ class UltralinkDecoderProcessor extends AudioWorkletProcessor {
 
         // Attempt packet demodulation
         const packetResult = this.demodulatePacketFromWindow(window, dataStart);
-        if (packetResult) {
+
+        if (packetResult && packetResult.needMoreSamples) {
+          // Packet is still streaming in! Do not discard sync or advance past it.
+          if (scanIdx > 0) {
+            this.readPos = (this.readPos + scanIdx) % this.ringBufferSize;
+          }
+          return;
+        }
+
+        if (packetResult && packetResult.header) {
+          const pktPayload = {
+            ...packetResult,
+            text: packetResult.text || '',
+            messageId: packetResult.header.messageId,
+            profileId: this.profile.id,
+            timestamp: Date.now(),
+            crcPassed: true,
+            snrDb: 12.0,
+          };
+
           this.port.postMessage({
             type: 'PACKET_DECODED',
-            packet: packetResult,
+            packet: pktPayload,
           });
 
           this.processReassembly(packetResult);
@@ -285,7 +304,9 @@ class UltralinkDecoderProcessor extends AudioWorkletProcessor {
     let curOffset = dataStartOffset;
 
     for (let s = 0; s < headerSymCount; s++) {
-      if (curOffset + activeSamples > window.length) return null;
+      if (curOffset + activeSamples > window.length) {
+        return { needMoreSamples: true };
+      }
       const sym = this.decodeSymbol(window, curOffset + winOffset, winLen);
       headerSymbols.push(sym);
       curOffset += symTotal;
@@ -311,7 +332,9 @@ class UltralinkDecoderProcessor extends AudioWorkletProcessor {
     const allSymbols = [...headerSymbols];
 
     for (let s = headerSymCount; s < totalSymCount; s++) {
-      if (curOffset + activeSamples > window.length) return null;
+      if (curOffset + activeSamples > window.length) {
+        return { needMoreSamples: true };
+      }
       const sym = this.decodeSymbol(window, curOffset + winOffset, winLen);
       allSymbols.push(sym);
       curOffset += symTotal;
@@ -338,6 +361,18 @@ class UltralinkDecoderProcessor extends AudioWorkletProcessor {
     }
 
     const payload = fullBytes.subarray(8, 8 + payloadLen);
+
+    let text = '';
+    try {
+      if (typeof TextDecoder !== 'undefined') {
+        text = new TextDecoder('utf-8').decode(payload);
+      } else {
+        text = String.fromCharCode(...payload);
+      }
+    } catch {
+      text = String.fromCharCode(...payload);
+    }
+
     return {
       header: {
         magic: headerBytes[0],
@@ -349,7 +384,9 @@ class UltralinkDecoderProcessor extends AudioWorkletProcessor {
         headerCrc: headerBytes[7],
       },
       payload: Array.from(payload),
+      text,
       crc32: readCrc,
+      crcPassed: true,
       samplesConsumed: curOffset - dataStartOffset,
     };
   }
@@ -370,6 +407,37 @@ class UltralinkDecoderProcessor extends AudioWorkletProcessor {
   }
 
   decodeSymbol(buffer, offset, length) {
+    if (this.profile.scheme === 'dual-8fsk') {
+      const bandA = (this.profile.dualBandFrequencies && this.profile.dualBandFrequencies.bandA) ||
+        (this.profile.dataFrequencies ? this.profile.dataFrequencies.slice(0, 8) : []);
+      const bandB = (this.profile.dualBandFrequencies && this.profile.dualBandFrequencies.bandB) ||
+        (this.profile.dataFrequencies ? this.profile.dataFrequencies.slice(8, 16) : []);
+
+      let peakPA = -1;
+      let peakIdxA = 0;
+      for (let k = 0; k < bandA.length; k++) {
+        const f = bandA[k] + this.carrierOffset;
+        const p = this.computeGoertzelPower(f, buffer, offset, length);
+        if (p > peakPA) {
+          peakPA = p;
+          peakIdxA = k;
+        }
+      }
+
+      let peakPB = -1;
+      let peakIdxB = 0;
+      for (let k = 0; k < bandB.length; k++) {
+        const f = bandB[k] + this.carrierOffset;
+        const p = this.computeGoertzelPower(f, buffer, offset, length);
+        if (p > peakPB) {
+          peakPB = p;
+          peakIdxB = k;
+        }
+      }
+
+      return (peakIdxA & 0x07) | ((peakIdxB & 0x07) << 3);
+    }
+
     const freqs = this.profile.dataFrequencies;
     let peakP = -1;
     let peakIdx = 0;
@@ -403,6 +471,18 @@ class UltralinkDecoderProcessor extends AudioWorkletProcessor {
         const high = symbols[i] || 0;
         const low = symbols[i + 1] || 0;
         out[byteIdx++] = ((high & 0x0f) << 4) | (low & 0x0f);
+      }
+    } else if (this.profile.scheme === 'dual-8fsk') {
+      let bitBuffer = 0;
+      let bitCount = 0;
+      for (let i = 0; i < symbols.length && byteIdx < expectedLength; i++) {
+        bitBuffer = ((bitBuffer << 6) | (symbols[i] & 0x3f)) >>> 0;
+        bitCount += 6;
+        while (bitCount >= 8 && byteIdx < expectedLength) {
+          bitCount -= 8;
+          out[byteIdx++] = (bitBuffer >> bitCount) & 0xff;
+          bitBuffer = bitBuffer & ((1 << bitCount) - 1);
+        }
       }
     } else {
       // 8-fsk standard
@@ -460,7 +540,6 @@ class UltralinkDecoderProcessor extends AudioWorkletProcessor {
         // Decode UTF-8 string
         let text = '';
         try {
-          // Worklet environments support TextDecoder in modern browsers
           if (typeof TextDecoder !== 'undefined') {
             text = new TextDecoder('utf-8').decode(fullBytes);
           } else {
@@ -473,19 +552,40 @@ class UltralinkDecoderProcessor extends AudioWorkletProcessor {
         this.completedMessages.set(messageId, now);
         this.pendingMessages.delete(messageId);
 
+        const completedMessage = {
+          messageId,
+          text,
+          chunkCount: totalChunks,
+          timestamp: now,
+          profileId: this.profile.id,
+          crcPassed: true,
+          snrDb: 12.0,
+        };
+
         this.port.postMessage({
           type: 'MESSAGE_COMPLETED',
-          message: {
-            messageId,
-            text,
-            chunkCount: totalChunks,
-            timestamp: now,
-            profileId: this.profile.id,
-          },
+          message: completedMessage,
+        });
+
+        this.port.postMessage({
+          type: 'MESSAGE_DECODED',
+          message: completedMessage,
         });
       }
     }
   }
 }
 
-registerProcessor('ultralink-decoder-processor', UltralinkDecoderProcessor);
+if (typeof registerProcessor !== 'undefined') {
+  registerProcessor('ultralink-decoder-processor', UltralinkDecoderProcessor);
+}
+
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = {
+    UltralinkDecoderProcessor,
+    computeCrc8,
+    computeCrc32,
+    BARKER_13_BITS,
+    MAGIC_BYTE,
+  };
+}

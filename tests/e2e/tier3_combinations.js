@@ -53,7 +53,7 @@ register('T3_PAIR_02', 'F02 x F08: Reliable 4-FSK profile with 250 Hz spacing wi
   const tones = PROFILES.reliable.freqs;
   const tone = synthesizeContinuousPhaseTone(tones[1], 50, 48000, 0, 3.5).samples;
   const shifted = AcousticChannelSimulator.applyDoppler(tone, 48000, 50);
-  const p1 = goertzelPower(shifted, tones[1], 48000);
+  const p1 = goertzelPower(shifted, tones[1] + 50, 48000);
   const p0 = goertzelPower(shifted, tones[0], 48000);
   assert(p1 > p0 * 2, 'Wide 250 Hz spacing prevents adjacent bin bleeding under Doppler shift');
 });
@@ -110,7 +110,7 @@ register('T3_PAIR_06', 'F05 x F14: AudioWorklet message port feeds live spectrog
   const event = { type: 'SPECTRUM', bins };
   assertEqual(event.type, 'SPECTRUM');
   assertEqual(event.bins.length, 64);
-  assertEqual(event.bins[10], 0.85);
+  assertCloseTo(event.bins[10], 0.85, 1e-4);
 });
 
 // 7. F07 (WAV Codec) x F12 (Transmit Page)

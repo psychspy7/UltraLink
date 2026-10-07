@@ -39,6 +39,14 @@ import {
   type FeedbackData
 } from './mock-service';
 
+export {
+  type UserProfileData,
+  type UserPreferencesData,
+  type MessageHistoryTelemetryData,
+  type DeviceTelemetryData,
+  type FeedbackData
+};
+
 
 let realDbInstance: Firestore | null = null;
 

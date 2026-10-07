@@ -150,20 +150,29 @@ export default function LiveListenPage() {
           if (data.type === 'SYNC_DETECTED' || data.type === 'PREAMBLE_DETECTED') {
             setPreambleDetected(true);
             setTimeout(() => setPreambleDetected(false), 2000);
-          } else if (data.type === 'PACKET_DECODED' || data.type === 'MESSAGE_DECODED') {
-            const pkt: DecodedMessage = data.packet || data.message;
+          } else if (
+            data.type === 'PACKET_DECODED' ||
+            data.type === 'MESSAGE_DECODED' ||
+            data.type === 'MESSAGE_COMPLETED'
+          ) {
+            const pkt: any = data.packet || data.message;
             if (pkt && pkt.text) {
               const item: LivePacketItem = {
-                id: `live_${Date.now()}_${pkt.messageId}`,
-                messageId: pkt.messageId,
+                id: `live_${Date.now()}_${pkt.messageId || Math.random().toString(36).substring(2, 6)}`,
+                messageId: pkt.messageId || 0,
                 text: pkt.text,
                 profileId: pkt.profileId || selectedProfile.id,
                 snrDb: pkt.snrDb || pkt.snrAverage || 12.0,
-                timestamp: Date.now(),
+                timestamp: pkt.timestamp || Date.now(),
                 crcPassed: pkt.crcPassed ?? true,
               };
 
-              setLiveMessages((prev) => [item, ...prev]);
+              setLiveMessages((prev) => {
+                if (prev.some((m) => m.messageId === item.messageId && m.text === item.text)) {
+                  return prev;
+                }
+                return [item, ...prev];
+              });
 
               // Save to offline message vault
               saveMessageRecord({

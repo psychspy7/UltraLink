@@ -48,9 +48,17 @@ function computeCrc32(data) {
 const BARKER_13_BITS = [1, 1, 1, 1, 1, 0, 0, 1, 1, 0, 1, 0, 1];
 const MAGIC_BYTE = 0xd5;
 
-class UltralinkDecoderProcessor extends AudioWorkletProcessor {
+const BaseAudioProcessor = typeof AudioWorkletProcessor !== 'undefined' ? AudioWorkletProcessor : class {};
+
+class UltralinkDecoderProcessor extends BaseAudioProcessor {
   constructor(options) {
     super(options);
+    if (!this.port) {
+      this.port = {
+        postMessage: (_msg) => {},
+        onmessage: null,
+      };
+    }
 
     this.sampleRate = 48000;
     this.profile = {

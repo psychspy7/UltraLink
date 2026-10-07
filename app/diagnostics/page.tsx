@@ -486,7 +486,9 @@ export default function DiagnosticsPage() {
             {pwaStatus.standalone ? (
               <CheckCircle2 className="w-4 h-4 text-emerald-400" />
             ) : (
-              <HelpCircle className="w-4 h-4 text-slate-500" title="Browser Tab Mode" />
+              <span title="Browser Tab Mode">
+                <HelpCircle className="w-4 h-4 text-slate-500" />
+              </span>
             )}
           </div>
         </div>

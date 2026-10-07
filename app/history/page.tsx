@@ -77,7 +77,7 @@ export default function HistoryPage() {
     try {
       const sampleRate = msg.sampleRate || 48000;
       const wavBytes = encodeTextToWav(msg.text, DEFAULT_PROFILE, sampleRate);
-      const blob = new Blob([wavBytes], { type: 'audio/wav' });
+      const blob = new Blob([wavBytes as any], { type: 'audio/wav' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;

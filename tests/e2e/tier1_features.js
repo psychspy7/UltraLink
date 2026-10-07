@@ -480,7 +480,7 @@ register('T1_F12_01', 'F12', 'Message composer calculates UTF-8 byte length and 
   const msg = 'Test transmission ✨';
   const bytes = encodeUtf8(msg);
   const chunkCount = Math.ceil(bytes.length / PROFILES.balanced.maxPayloadBytes);
-  assertEqual(bytes.length, 23);
+  assertEqual(bytes.length, 21);
   assertEqual(chunkCount, 1);
 });
 

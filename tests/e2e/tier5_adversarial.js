@@ -117,7 +117,7 @@ register('T5_ADV_03', 'Complex ZWJ family sequences and multi-emoji chains survi
 register('T5_ADV_04', 'Massive 512-byte payload chunks into 32 packets and reassembles in reverse order (31 down to 0)', () => {
   let largeText = '';
   for (let i = 0; i < 32; i++) {
-    largeText += `[CHUNK_${i.toString().padStart(2, '0')}_ULTRALINK]`;
+    largeText += `[CHUNK_${i.toString().padStart(2, '0')}_TEST!]`;
   }
   const payloadBytes = encodeUtf8(largeText);
   const totalChunks = 32;

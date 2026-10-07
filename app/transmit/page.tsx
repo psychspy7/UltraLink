@@ -161,7 +161,7 @@ export default function TransmitPage() {
       const wavBytes = encodeTextToWav(text, profile, sampleRate);
       setGeneratedBuffer(encodeTextToAudioBuffer(text, profile, sampleRate));
 
-      const blob = new Blob([wavBytes], { type: 'audio/wav' });
+      const blob = new Blob([wavBytes as any], { type: 'audio/wav' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;

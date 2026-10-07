@@ -44,3 +44,7 @@ Integrity mode: demo
 ### Backend & Deployment
 - [ ] Users can sign in (or use guest mode) and Firestore Security Rules successfully prevent users from reading or writing other users' private data.
 - [ ] Running `npm run build` succeeds without type or lint errors, producing an optimized Next.js build.
+
+## Follow-up — 2026-10-06T19:28:51Z
+
+use gemini

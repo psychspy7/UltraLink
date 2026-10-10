@@ -177,39 +177,44 @@ export class Demodulator {
 
       // Strong Barker correlation threshold: at least 11 out of 13 chips matching
       if (matchScore >= 11) {
-        // Refine synchronization boundary within +/- 1 chip window
-        let bestScore = matchScore;
+        // Barker bit agreement alone has a wide plateau: the first 13/13
+        // match can precede the actual chip boundary by much of a chip.
+        // Compare normalized expected-vs-opposing pilot energy to locate
+        // the strongest, correctly aligned full Barker sequence.
+        let bestScore = -1;
+        let bestMargin = -Infinity;
         let bestOffset = scanIdx;
         const fineSearchStart = Math.max(0, scanIdx - chipSamples);
         const fineSearchEnd = Math.min(endScan, scanIdx + chipSamples);
-        const fineStep = Math.max(1, Math.floor(this.sampleRate / 4000)); // ~10-12 samples step
+        const fineStep = Math.max(1, Math.floor(this.sampleRate / 4000));
 
         for (let fineIdx = fineSearchStart; fineIdx <= fineSearchEnd; fineIdx += fineStep) {
           let score = 0;
+          let margin = 0;
           for (let c = 0; c < BARKER_13_BITS.length; c++) {
             const cOffset = fineIdx + c * chipSamples;
             const p0 = GoertzelFilterBank.computeSingleFrequencyPower(
-              f0,
-              samples,
-              this.sampleRate,
-              cOffset,
-              chipSamples
+              f0, samples, this.sampleRate, cOffset, chipSamples
             );
             const p1 = GoertzelFilterBank.computeSingleFrequencyPower(
-              f1,
-              samples,
-              this.sampleRate,
-              cOffset,
-              chipSamples
+              f1, samples, this.sampleRate, cOffset, chipSamples
             );
-            const bit = BARKER_13_BITS[c];
-            if (bit === 1 && p1 > p0) score++;
-            else if (bit === 0 && p0 > p1) score++;
+            const expected = BARKER_13_BITS[c] === 1 ? p1 : p0;
+            const opposing = BARKER_13_BITS[c] === 1 ? p0 : p1;
+            const contrast = (expected - opposing) / (expected + opposing + 1e-9);
+            if (contrast > 0) score++;
+            margin += contrast;
           }
-          if (score > bestScore) {
+          if (score > bestScore || (score === bestScore && margin > bestMargin)) {
             bestScore = score;
+            bestMargin = margin;
             bestOffset = fineIdx;
           }
+        }
+
+        if (bestScore < 11) {
+          scanIdx += Math.max(1, Math.floor(chipSamples / 3));
+          continue;
         }
 
         const syncStart = bestOffset;

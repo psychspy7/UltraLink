@@ -92,16 +92,30 @@ function addAwgnNoise(samples: Float32Array, snrDb: number): Float32Array {
   return noisy;
 }
 
-// Helper: Apply frequency offset / Doppler drift
-function applyFrequencyOffset(samples: Float32Array, sampleRate: number, offsetHz: number): Float32Array {
-  if (Math.abs(offsetHz) < 1e-3) return new Float32Array(samples);
-  const shifted = new Float32Array(samples.length);
-  for (let i = 0; i < samples.length; i++) {
-    // Frequency modulation: multiply by exp(j * 2*pi*df*t) real part
-    const phase = (2 * Math.PI * offsetHz * i) / sampleRate;
-    shifted[i] = samples[i] * Math.cos(phase);
-  }
-  return shifted;
+// A narrow-band carrier frequency offset is a shared shift of pilot, data,
+// and chirp frequencies, not multiplication by a cosine. Cosine multiplication
+// makes two sidebands (AM) and is *not* a signed Doppler shift.
+function encodeWithCarrierOffset(
+  text: string,
+  profile: ModulationProfile,
+  sampleRate: number,
+  messageId: number,
+  offsetHz: number
+): Float32Array {
+  const adjusted: ModulationProfile = {
+    ...profile,
+    dataFrequencies: profile.dataFrequencies.map(f => f + offsetHz),
+    pilotFrequencies: profile.pilotFrequencies.map(f => f + offsetHz),
+    chirpStartFreq: profile.chirpStartFreq + offsetHz,
+    chirpEndFreq: profile.chirpEndFreq + offsetHz,
+    dualBandFrequencies: profile.dualBandFrequencies
+      ? {
+          bandA: profile.dualBandFrequencies.bandA.map(f => f + offsetHz),
+          bandB: profile.dualBandFrequencies.bandB.map(f => f + offsetHz),
+        }
+      : undefined,
+  };
+  return encodeTextToAudioBuffer(text, adjusted, sampleRate, messageId);
 }
 
 describe('Adversarial DSP Suite — 1. Multi-Byte Unicode, CJK, RTL & Complex Emojis', () => {
@@ -169,10 +183,11 @@ describe('Adversarial DSP Suite — 1. Multi-Byte Unicode, CJK, RTL & Complex Em
 describe('Adversarial DSP Suite — 2. Massive Payloads & Out-of-Order / Scrambled Reassembly', () => {
   it('chunks and cleanly reassembles massive 512-byte payload with 32 chunks in reverse order', () => {
     // Generate high-entropy 512-byte alphanumeric text
-    let largeText = '';
-    for (let i = 0; i < 32; i++) {
-      largeText += `[Block-${i.toString().padStart(2, '0')}:UltraLink-Acoustic-Chunk]`;
-    }
+    // 32 exact 16-byte ASCII blocks = 512 bytes, even at UTF-8 level.
+    const largeText = Array.from(
+      { length: 32 },
+      (_, i) => `[BLK:${i.toString().padStart(4, '0')}]`.padEnd(16, '!')
+    ).join('');
     const profile = PROFILES.reliable; // 16 bytes per chunk -> exactly 32 chunks
 
     const packets = chunkText(largeText, profile, 9001);
@@ -226,7 +241,7 @@ describe('Adversarial DSP Suite — 2. Massive Payloads & Out-of-Order / Scrambl
   });
 
   it('rejects duplicate chunks and duplicate completed messages without state corruption', () => {
-    const text = 'Deduplication Safety Test';
+    const text = 'Deduplication Safety Test: two or more packet chunks required';
     const profile = PROFILES.balanced;
     const packets = chunkText(text, profile, 9003);
 
@@ -301,8 +316,7 @@ describe('Adversarial DSP Suite — 3. AWGN Noise and Doppler Shift (+-50 Hz)', 
     const profile = PROFILES.balanced;
     const sampleRate = 48000;
 
-    const audio = encodeTextToAudioBuffer(message, profile, sampleRate, 7201);
-    const shiftedAudio = applyFrequencyOffset(audio, sampleRate, 30.0);
+    const shiftedAudio = encodeWithCarrierOffset(message, profile, sampleRate, 7201, 30.0);
 
     const decoded = decodeAudioSamples(shiftedAudio, sampleRate, {
       profile,
@@ -319,8 +333,7 @@ describe('Adversarial DSP Suite — 3. AWGN Noise and Doppler Shift (+-50 Hz)', 
     const profile = PROFILES.balanced;
     const sampleRate = 48000;
 
-    const audio = encodeTextToAudioBuffer(message, profile, sampleRate, 7202);
-    const shiftedAudio = applyFrequencyOffset(audio, sampleRate, -30.0);
+    const shiftedAudio = encodeWithCarrierOffset(message, profile, sampleRate, 7202, -30.0);
 
     const decoded = decodeAudioSamples(shiftedAudio, sampleRate, {
       profile,
@@ -341,8 +354,14 @@ describe('Adversarial DSP Suite — 3. AWGN Noise and Doppler Shift (+-50 Hz)', 
     const destroyedAudio = addAwgnNoise(audio, 0.0); // 0 dB SNR = pure noise
 
     const decoded = decodeAudioSamples(destroyedAudio, sampleRate, { profile });
-    // MUST either reject sync or fail CRC; zero corrupt messages
-    expect(decoded.length).toBe(0);
+    // 0 dB is input SNR, not guaranteed decoding failure. Coherent
+    // narrow-band integration can still recover the *correct* payload.
+    // Reject false text; never expose a CRC-invalid message.
+    expect(decoded.length).toBeLessThanOrEqual(1);
+    for (const result of decoded) {
+      expect(result.text).toBe(message);
+      expect(result.crcPassed).toBe(true);
+    }
   });
 });
 

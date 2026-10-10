@@ -188,7 +188,7 @@ describe('Out-of-Order Reassembly & Duplicate Detection', () => {
   });
 
   it('rejects duplicate chunks and duplicate completed messages', () => {
-    const text = 'Duplicate test message';
+    const text = 'Duplicate test message spanning multiple payload chunks';
     const profile = PROFILES.balanced;
     const packets = chunkText(text, profile, 8888);
 

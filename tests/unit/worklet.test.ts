@@ -44,11 +44,10 @@ describe('AudioWorklet Decoder Processor (UltralinkDecoderProcessor)', () => {
   beforeEach(() => {
     postedMessages = [];
     processor = new UltralinkDecoderProcessor();
-    processor.port = {
-      postMessage: (msg: any) => {
-        postedMessages.push(msg);
-      },
-      onmessage: null,
+    // Keep the message handler installed by the real constructor.
+    // Replacing the whole port would discard onmessage and break RESET tests.
+    processor.port.postMessage = (msg: any) => {
+      postedMessages.push(msg);
     };
   });
 

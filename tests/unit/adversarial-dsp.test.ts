@@ -169,10 +169,11 @@ describe('Adversarial DSP Suite — 1. Multi-Byte Unicode, CJK, RTL & Complex Em
 describe('Adversarial DSP Suite — 2. Massive Payloads & Out-of-Order / Scrambled Reassembly', () => {
   it('chunks and cleanly reassembles massive 512-byte payload with 32 chunks in reverse order', () => {
     // Generate high-entropy 512-byte alphanumeric text
-    let largeText = '';
-    for (let i = 0; i < 32; i++) {
-      largeText += `[Block-${i.toString().padStart(2, '0')}:UltraLink-Acoustic-Chunk]`;
-    }
+    // 32 exact 16-byte ASCII blocks = 512 bytes, even at UTF-8 level.
+    const largeText = Array.from(
+      { length: 32 },
+      (_, i) => `[BLK:${i.toString().padStart(4, '0')}]`.padEnd(16, '!')
+    ).join('');
     const profile = PROFILES.reliable; // 16 bytes per chunk -> exactly 32 chunks
 
     const packets = chunkText(largeText, profile, 9001);
@@ -226,7 +227,7 @@ describe('Adversarial DSP Suite — 2. Massive Payloads & Out-of-Order / Scrambl
   });
 
   it('rejects duplicate chunks and duplicate completed messages without state corruption', () => {
-    const text = 'Deduplication Safety Test';
+    const text = 'Deduplication Safety Test: two or more packet chunks required';
     const profile = PROFILES.balanced;
     const packets = chunkText(text, profile, 9003);
 

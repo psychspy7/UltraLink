@@ -182,15 +182,21 @@ describe('Noise Tolerance and Doppler Shift Hardening', () => {
 
     const audio = encodeTextToAudioBuffer(message, profile, sampleRate, 701);
 
-    // Corrupt symbol portion in middle of packet
+    // Erase six complete payload symbols while preserving Barker sync,
+    // the header and its CRC. This guarantees that payload bytes differ
+    // rather than relying on random noise which might leave tone decisions
+    // unchanged after the receiver's narrow-band integration.
     const corruptedAudio = new Float32Array(audio);
-    const mid = Math.floor(corruptedAudio.length / 2);
-    for (let i = mid; i < mid + 2000; i++) {
-      corruptedAudio[i] = (Math.random() - 0.5) * 0.9;
-    }
+    const symbolSamples = Math.round(profile.symbolDurationMs * sampleRate / 1000);
+    const headerSymbols = Math.ceil(8 * 8 / profile.bitsPerSymbol);
+    const dataStart = Math.round(
+      (profile.chirpDurationMs + 13 * 5 + 10) * sampleRate / 1000
+    );
+    const payloadSymbolStart = dataStart + (headerSymbols + 2) * symbolSamples;
+    corruptedAudio.fill(0, payloadSymbolStart, payloadSymbolStart + 6 * symbolSamples);
 
     const decoded = decodeAudioSamples(corruptedAudio, sampleRate, { profile });
-    // Corrupted packet MUST be rejected by CRC8 or CRC32
+    // Erased payload changes must be rejected rather than emitted as text.
     expect(decoded.length).toBe(0);
   });
 });
